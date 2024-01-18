@@ -9,7 +9,7 @@ type Networker interface {
 	AddRecvCallback(callback RecvCallback)
 }
 
-type Storage interface {
-	SaveState(ctx context.Context, state []byte)
-	RestoreState(ctx context.Context) []byte
+type LogStore interface {
+	Append(ctx context.Context, data []byte)
+	GetAllLogs(ctx context.Context) [][]byte
 }

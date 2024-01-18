@@ -1,4 +1,4 @@
-package config
+package raft
 
 type ClusterConfig struct {
 	Nodes       []string

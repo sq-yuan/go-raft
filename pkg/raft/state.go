@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
-	"go-raft/pkg/plugin"
 )
 
 type RaftRole int
@@ -15,17 +14,18 @@ const (
 	RaftRoleCandidate RaftRole = 3
 )
 
-type LogEntry struct {
-	Payload []byte
-	Term    int
+type PersistedState struct {
+	CurrentTerm   int
+	VotedFor      string
+	CommitedIndex int
+	// local buffer
+	LocalBuffer [][]byte
 }
 
 type RaftState struct {
-	CurrentTerm int
-	VotedFor    string
-	Logs        []LogEntry
+	PersistedState
 
-	CommitLength  int
+	// Volatile states
 	CurrentRole   RaftRole
 	CurrentLeader string
 
@@ -33,44 +33,46 @@ type RaftState struct {
 
 	SentLength  map[string]int
 	AckedLength map[string]int
-
-	LocalBuffer [][]byte
 }
 
-func NewRaftState() *RaftState {
-	return &RaftState{
-		CurrentTerm:   0,
-		VotedFor:      "",
-		CommitLength:  0,
+func NewRestoredRaftState(ctx context.Context, cfg ClusterConfig, store StateStore) *RaftState {
+	state := &RaftState{
+		PersistedState: PersistedState{
+			CurrentTerm:   0,
+			VotedFor:      "",
+			CommitedIndex: 0,
+			LocalBuffer:   [][]byte{},
+		},
 		CurrentRole:   RaftRoleFollower,
 		CurrentLeader: "",
 		VotesReceived: map[string]bool{},
 		SentLength:    map[string]int{},
 		AckedLength:   map[string]int{},
-		Logs:          []LogEntry{},
-		LocalBuffer:   [][]byte{},
 	}
+	state.Restore(ctx, store)
+	for _, node := range cfg.Nodes {
+		state.SentLength[node] = state.CommitedIndex
+		state.VotesReceived[node] = false
+	}
+	return state
 }
 
-func NewRestoredRaftState(ctx context.Context, store plugin.Storage) *RaftState {
-	bytestate := store.RestoreState(ctx)
-	decoder := gob.NewDecoder(bytes.NewReader(bytestate))
-	var state RaftState
-	decoder.Decode(&state)
-
-	state.CurrentRole = RaftRoleFollower
-	state.CurrentLeader = ""
-	state.VotesReceived = map[string]bool{}
-	state.SentLength = map[string]int{}
-	state.AckedLength = map[string]int{}
-
-	return &state
+func (s *RaftState) Restore(ctx context.Context, store StateStore) error {
+	data, err := store.Restore(ctx)
+	if err != nil {
+		return err
+	}
+	decoder := gob.NewDecoder(bytes.NewReader(data))
+	var pstate PersistedState
+	decoder.Decode(&pstate)
+	s.PersistedState = pstate
+	return nil
 }
 
-func (s *RaftState) Save(ctx context.Context, store plugin.Storage) {
+func (s *RaftState) Save(ctx context.Context, store StateStore) error {
 	var buf bytes.Buffer
 	encoder := gob.NewEncoder(&buf)
-	encoder.Encode(s)
+	encoder.Encode(s.PersistedState)
 
-	store.SaveState(ctx, buf.Bytes())
+	return store.Save(ctx, buf.Bytes())
 }

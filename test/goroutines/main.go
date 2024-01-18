@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"go-raft/pkg/broadcast"
-	"go-raft/pkg/config"
 	"go-raft/pkg/plugin"
 	"go-raft/pkg/raft"
 	"log"
@@ -30,20 +29,29 @@ func main() {
 	netC := &Net{C: cmap[nodeC], CMap: cmap}
 
 	ctx := context.Background()
-	raftA := raft.NewRaft(ctx, config.ClusterConfig{
+	raftA, err := raft.NewRaft(ctx, raft.ClusterConfig{
 		CurrentNode: nodeA,
 		Nodes:       nodes,
-	}, netA, &Store{}, log.Default())
+	}, netA, log.Default())
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	raftB := raft.NewRaft(ctx, config.ClusterConfig{
+	raftB, err := raft.NewRaft(ctx, raft.ClusterConfig{
 		CurrentNode: nodeB,
 		Nodes:       nodes,
-	}, netB, &Store{}, log.Default())
+	}, netB, log.Default())
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	raftC := raft.NewRaft(ctx, config.ClusterConfig{
+	raftC, err := raft.NewRaft(ctx, raft.ClusterConfig{
 		CurrentNode: nodeC,
 		Nodes:       nodes,
-	}, netC, &Store{}, log.Default())
+	}, netC, log.Default())
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// create three applications
 	appA := NewApp(nodeA, raftA)
@@ -99,10 +107,10 @@ func (n *Net) Stop() {
 type Store struct {
 }
 
-func (s *Store) SaveState(ctx context.Context, state []byte) {
+func (s *Store) Append(ctx context.Context, state []byte) {
 }
 
-func (s *Store) RestoreState(ctx context.Context) []byte {
+func (s *Store) GetAllLogs(ctx context.Context) [][]byte {
 	return nil
 }
 

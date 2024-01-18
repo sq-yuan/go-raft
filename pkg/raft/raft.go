@@ -3,7 +3,6 @@ package raft
 import (
 	"context"
 	"go-raft/pkg/broadcast"
-	"go-raft/pkg/config"
 	"go-raft/pkg/plugin"
 	"log"
 	"math/rand"
@@ -42,12 +41,14 @@ type event struct {
 }
 
 type Raft struct {
-	cfg    config.ClusterConfig
+	cfg    ClusterConfig
 	net    plugin.Networker
-	store  plugin.Storage
 	logger *log.Logger
 
 	state *RaftState
+
+	logstore   LogStore
+	statestore StateStore
 
 	msgHandler broadcast.MessageHandler
 
@@ -63,23 +64,31 @@ type Raft struct {
 
 func NewRaft(
 	ctx context.Context,
-	cfg config.ClusterConfig,
+	cfg ClusterConfig,
 	net plugin.Networker,
-	store plugin.Storage,
-	logger *log.Logger) *Raft {
-	state := NewRestoredRaftState(ctx, store)
+	logger *log.Logger) (*Raft, error) {
+	logstore, err := NewLogStore(cfg.CurrentNode + "-log")
+	if err != nil {
+		return nil, err
+	}
+	statestore, err := NewStateStore(cfg.CurrentNode + "-state")
+	if err != nil {
+		return nil, err
+	}
+	state := NewRestoredRaftState(ctx, cfg, statestore)
 	if state == nil {
-		panic("failed to restore from state")
+		return nil, err
 	}
 	return &Raft{
-		cfg:     cfg,
-		net:     net,
-		store:   store,
-		logger:  logger,
-		state:   state,
-		ch:      make(chan event, 10),
-		running: false,
-	}
+		cfg:        cfg,
+		net:        net,
+		logger:     logger,
+		state:      state,
+		logstore:   logstore,
+		statestore: statestore,
+		ch:         make(chan event, 10),
+		running:    false,
+	}, nil
 }
 
 // callback for network receive
@@ -226,7 +235,7 @@ func (r *Raft) cancelElectionTimer() {
 
 // persist the current state
 func (r *Raft) saveState() {
-	r.state.Save(context.Background(), r.store)
+	r.state.Save(context.Background(), r.statestore)
 }
 
 // append messages
@@ -235,11 +244,15 @@ func (r *Raft) appendMessages(payloads [][]byte) {
 		r.log("appendMessages called while node is not leader")
 		return
 	}
+	var logs []LogEntry
 	for _, payload := range payloads {
-		r.state.Logs = append(r.state.Logs,
-			LogEntry{Term: r.state.CurrentTerm, Payload: payload})
-		r.state.AckedLength[r.cfg.CurrentNode] = len(r.state.Logs)
+		logs = append(logs, LogEntry{Term: r.state.CurrentTerm, Payload: payload})
 	}
+	err := r.logstore.Append(logs)
+	if err != nil {
+		r.log("failed to persist log, err=%s", err.Error())
+	}
+	r.state.AckedLength[r.cfg.CurrentNode] = r.logstore.TotalCount()
 	r.replicateLogs()
 }
 
@@ -251,15 +264,16 @@ func (r *Raft) replicateLog(node string) {
 	}
 	prefixLen := r.state.SentLength[node]
 	var surfix []LogItem
-	for i := prefixLen; i < len(r.state.Logs); i++ {
+	for i := prefixLen; i < r.logstore.TotalCount(); i++ {
+		log := r.logstore.Entry(i)
 		surfix = append(surfix, LogItem{
-			Term:    r.state.Logs[i].Term,
-			Payload: r.state.Logs[i].Payload,
+			Term:    log.Term,
+			Payload: log.Payload,
 		})
 	}
 	prefixTerm := 0
 	if prefixLen > 0 {
-		prefixTerm = r.state.Logs[prefixLen-1].Term
+		prefixTerm = r.logstore.Entry(prefixLen - 1).Term
 	}
 	r.log("replicate logs")
 	r.send(node, &RaftMessage{
@@ -268,7 +282,7 @@ func (r *Raft) replicateLog(node string) {
 			Term:       r.state.CurrentTerm,
 			PerfixLen:  prefixLen,
 			PrefixTerm: prefixTerm,
-			CommitLen:  r.state.CommitLength,
+			CommitLen:  r.state.PersistedState.CommitedIndex,
 			Surfix:     surfix,
 		},
 	})
@@ -285,35 +299,24 @@ func (r *Raft) replicateLogs() {
 
 // append log entries to local log
 func (r *Raft) appendLogEntries(prefixLen, leaderCommit int, suffix []LogItem) {
-	changed := false
-	suffixIdx := 0
 	if len(suffix) > 0 {
-		if len(r.state.Logs) > int(prefixLen) {
-			if (prefixLen + len(suffix)) < len(r.state.Logs) {
-				r.state.Logs = r.state.Logs[0 : prefixLen+len(suffix)]
-			}
-			for i := prefixLen; i < len(r.state.Logs); i++ {
-				r.state.Logs[i].Term = suffix[suffixIdx].Term
-				r.state.Logs[i].Payload = suffix[suffixIdx].Payload
-				suffixIdx++
-			}
-		}
-		for i := suffixIdx; i < int(len(suffix)); i++ {
-			r.state.Logs = append(r.state.Logs, LogEntry{
+		var logs []LogEntry
+		for i := 0; i < int(len(suffix)); i++ {
+			logs = append(logs, LogEntry{
 				Term:    suffix[i].Term,
 				Payload: suffix[i].Payload,
 			})
 		}
-		changed = true
-	}
-	if leaderCommit > r.state.CommitLength {
-		for i := r.state.CommitLength; i < leaderCommit; i++ {
-			r.msgHandler(r.state.Logs[i].Payload)
+		err := r.logstore.RewindAndAppend(prefixLen, logs)
+		if err != nil {
+			r.log("failed to persist, err=%s", err.Error())
 		}
-		r.state.CommitLength = leaderCommit
-		changed = true
 	}
-	if changed {
+	if leaderCommit > r.state.CommitedIndex {
+		for i := r.state.CommitedIndex; i < leaderCommit; i++ {
+			r.msgHandler(r.logstore.Entry(i).Payload)
+		}
+		r.state.CommitedIndex = leaderCommit
 		r.saveState()
 	}
 }
@@ -328,11 +331,11 @@ func (r *Raft) tryCommitLog() {
 	idx := len(commitLens) - (len(commitLens)+1)/2
 
 	newCommitLen := commitLens[idx]
-	if newCommitLen > r.state.CommitLength {
-		for i := r.state.CommitLength; i < newCommitLen; i++ {
-			r.msgHandler(r.state.Logs[i].Payload)
+	if newCommitLen > r.state.CommitedIndex {
+		for i := r.state.CommitedIndex; i < newCommitLen; i++ {
+			r.msgHandler(r.logstore.Entry(i).Payload)
 		}
-		r.state.CommitLength = newCommitLen
+		r.state.CommitedIndex = newCommitLen
 		r.saveState()
 		r.replicateLogs()
 	}
@@ -340,7 +343,7 @@ func (r *Raft) tryCommitLog() {
 
 // append and flush local buffers to replication log
 func (r *Raft) appendAndFlushBuffers(payload []byte) {
-	prelen := len(r.state.Logs)
+	prelen := r.logstore.TotalCount()
 	if payload != nil {
 		r.state.LocalBuffer = append(r.state.LocalBuffer, payload)
 	}
@@ -375,8 +378,8 @@ func (r *Raft) runForLeader() {
 	r.state.VotedFor = r.cfg.CurrentNode
 	r.state.VotesReceived[r.cfg.CurrentNode] = true
 	lastTerm := 0
-	if len(r.state.Logs) > 0 {
-		lastTerm = r.state.Logs[len(r.state.Logs)-1].Term
+	if r.logstore.TotalCount() > 0 {
+		lastTerm = r.logstore.Back().Term
 	}
 
 	r.log("try to run for leader term=%d", r.state.CurrentTerm)
@@ -385,7 +388,7 @@ func (r *Raft) runForLeader() {
 		VoteReq: &VoteRequest{
 			NodeID:    r.cfg.CurrentNode,
 			Term:      r.state.CurrentTerm,
-			LogLength: len(r.state.Logs),
+			LogLength: r.logstore.TotalCount(),
 			LastTerm:  lastTerm,
 		},
 	})
@@ -410,11 +413,11 @@ func (r *Raft) onVoteRequest(msg *VoteRequest) {
 		r.state.VotedFor = ""
 	}
 	lastTerm := 0
-	if len(r.state.Logs) > 0 {
-		lastTerm = r.state.Logs[len(r.state.Logs)-1].Term
+	if r.logstore.TotalCount() > 0 {
+		lastTerm = r.logstore.Back().Term
 	}
 	logOk := msg.LastTerm > lastTerm ||
-		(msg.LastTerm == lastTerm && msg.LogLength >= len(r.state.Logs))
+		(msg.LastTerm == lastTerm && msg.LogLength >= r.logstore.TotalCount())
 	response := &VoteResponse{
 		NodeID: r.cfg.CurrentNode,
 		Term:   r.state.CurrentTerm,
@@ -477,8 +480,8 @@ func (r *Raft) onLogRequest(msg *LogRequest) {
 		// A new leader has been elected, try to flush local buffer
 		r.appendAndFlushBuffers(nil)
 	}
-	logOk := len(r.state.Logs) >= int(msg.PerfixLen) &&
-		(msg.PerfixLen == 0 || r.state.Logs[msg.PerfixLen-1].Term == msg.PrefixTerm)
+	logOk := r.logstore.TotalCount() >= int(msg.PerfixLen) &&
+		(msg.PerfixLen == 0 || r.logstore.Entry(msg.PerfixLen-1).Term == msg.PrefixTerm)
 	if msg.Term == r.state.CurrentTerm && logOk {
 		r.appendLogEntries(msg.PerfixLen, msg.CommitLen, msg.Surfix)
 		r.saveState()
@@ -494,8 +497,8 @@ func (r *Raft) onLogRequest(msg *LogRequest) {
 		// If we're missing some logs then ask leader to send the gap
 		// Otherwise, we have some stale logs, rollback one by one
 		gapLen := 1
-		if msg.PerfixLen > len(r.state.Logs) {
-			gapLen = msg.PerfixLen - len(r.state.Logs)
+		if msg.PerfixLen > r.logstore.TotalCount() {
+			gapLen = msg.PerfixLen - r.logstore.TotalCount()
 		}
 		r.send(msg.LeaderID, &RaftMessage{
 			LogResp: &LogResponse{
