@@ -2,7 +2,8 @@ package raft
 
 import (
 	"context"
-	"go-raft/pkg/broadcast"
+	"errors"
+	"fmt"
 	"go-raft/pkg/plugin"
 	"log"
 	"math/rand"
@@ -40,7 +41,7 @@ type event struct {
 	replTick *replicateTick
 }
 
-type Raft struct {
+type raft struct {
 	cfg    ClusterConfig
 	net    plugin.Networker
 	logger *log.Logger
@@ -50,7 +51,7 @@ type Raft struct {
 	logstore   LogStore
 	statestore StateStore
 
-	msgHandler broadcast.MessageHandler
+	msgHandler MessageHandler
 
 	ch chan event
 
@@ -66,7 +67,7 @@ func NewRaft(
 	ctx context.Context,
 	cfg ClusterConfig,
 	net plugin.Networker,
-	logger *log.Logger) (*Raft, error) {
+	logger *log.Logger) (Raft, error) {
 	logstore, err := NewLogStore(cfg.CurrentNode+"-log", logger)
 	if err != nil {
 		return nil, err
@@ -79,7 +80,7 @@ func NewRaft(
 	if state == nil {
 		return nil, err
 	}
-	return &Raft{
+	return &raft{
 		cfg:        cfg,
 		net:        net,
 		logger:     logger,
@@ -92,7 +93,7 @@ func NewRaft(
 }
 
 // callback for network receive
-func (r *Raft) netRecv(packet []byte) {
+func (r *raft) netRecv(packet []byte) {
 	if !r.running {
 		return
 	}
@@ -105,7 +106,7 @@ func (r *Raft) netRecv(packet []byte) {
 	}
 }
 
-func (r *Raft) Run() {
+func (r *raft) Run() {
 	r.running = true
 	r.net.AddRecvCallback(r.netRecv)
 
@@ -180,13 +181,13 @@ func (r *Raft) Run() {
 	}
 }
 
-func (r *Raft) Shutdown() {
+func (r *raft) Close() {
 	r.ch <- event{}
 	r.running = false
 }
 
 // Append a message to replication log
-func (r *Raft) Append(msg []byte) bool {
+func (r *raft) Append(msg []byte) bool {
 	if !r.running {
 		return false
 	}
@@ -195,16 +196,35 @@ func (r *Raft) Append(msg []byte) bool {
 }
 
 // Add a callback handler for state machine replication
-func (r *Raft) AddHandle(handler broadcast.MessageHandler) {
+func (r *raft) AddHandle(handler MessageHandler) {
 	r.msgHandler = handler
 }
 
-func (r *Raft) log(fmt string, v ...any) {
+// Replay the replication log from the specified LSN
+func (r *raft) Replay(lsn int) error {
+	if r.running {
+		return errors.New("cannot replay while state machine is running")
+	}
+	if lsn < 0 || lsn >= r.logstore.TotalCount() {
+		return fmt.Errorf("lsn out of range")
+	}
+	for _, log := range r.logstore.Entries(lsn, r.logstore.TotalCount()) {
+		r.msgHandler(log.LogIndex, log.Payload)
+	}
+	return nil
+}
+
+// Truncate logs till the specified LSN
+func (r *raft) Truncate(lsn int) error {
+	panic("not implemented")
+}
+
+func (r *raft) log(fmt string, v ...any) {
 	r.logger.Printf(r.cfg.CurrentNode+" | "+fmt+"\n", v...)
 }
 
 // send raft message to everyone
-func (r *Raft) broadcast(msg *RaftMessage) {
+func (r *raft) broadcast(msg *RaftMessage) {
 	bytes := Encode(msg)
 	for _, n := range r.cfg.Nodes {
 		if n != r.cfg.CurrentNode {
@@ -214,12 +234,12 @@ func (r *Raft) broadcast(msg *RaftMessage) {
 }
 
 // send raft message to recepient
-func (r *Raft) send(to string, msg *RaftMessage) error {
+func (r *raft) send(to string, msg *RaftMessage) error {
 	return r.net.Send(context.Background(), to, Encode(msg))
 }
 
 // restart the election timer
-func (r *Raft) resetElectionTimer() {
+func (r *raft) resetElectionTimer() {
 	timeout := ElectionTimeoutVal + time.Duration(rand.Intn(2000)*int(time.Millisecond))
 	// r.log("reset election timer %s", timeout)
 	if r.electTimer == nil {
@@ -229,17 +249,17 @@ func (r *Raft) resetElectionTimer() {
 	}
 }
 
-func (r *Raft) cancelElectionTimer() {
+func (r *raft) cancelElectionTimer() {
 	r.electTimer.Stop()
 }
 
 // persist the current state
-func (r *Raft) saveState() {
+func (r *raft) saveState() {
 	r.state.Save(context.Background(), r.statestore)
 }
 
 // append messages
-func (r *Raft) appendMessages(payloads [][]byte) {
+func (r *raft) appendMessages(payloads [][]byte) {
 	if r.state.CurrentRole != RaftRoleLeader {
 		r.log("appendMessages called while node is not leader")
 		return
@@ -257,7 +277,7 @@ func (r *Raft) appendMessages(payloads [][]byte) {
 }
 
 // replicate log to the node
-func (r *Raft) replicateLog(node string) {
+func (r *raft) replicateLog(node string) {
 	if r.state.CurrentRole != RaftRoleLeader {
 		r.log("error: replicateLog called while node is not leader")
 		return
@@ -289,7 +309,7 @@ func (r *Raft) replicateLog(node string) {
 }
 
 // replicate logs to all followers
-func (r *Raft) replicateLogs() {
+func (r *raft) replicateLogs() {
 	for _, node := range r.cfg.Nodes {
 		if node != r.cfg.CurrentNode {
 			r.replicateLog(node)
@@ -298,7 +318,7 @@ func (r *Raft) replicateLogs() {
 }
 
 // append log entries to local log
-func (r *Raft) appendLogEntries(prefixLen, leaderCommit int, suffix []LogItem) {
+func (r *raft) appendLogEntries(prefixLen, leaderCommit int, suffix []LogItem) {
 	if len(suffix) > 0 {
 		var logs []LogEntry
 		for i := 0; i < int(len(suffix)); i++ {
@@ -314,7 +334,8 @@ func (r *Raft) appendLogEntries(prefixLen, leaderCommit int, suffix []LogItem) {
 	}
 	if leaderCommit > r.state.CommitedIndex {
 		for i := r.state.CommitedIndex; i < leaderCommit; i++ {
-			r.msgHandler(r.logstore.Entry(i).Payload)
+			log := r.logstore.Entry(i)
+			r.msgHandler(log.LogIndex, log.Payload)
 		}
 		r.state.CommitedIndex = leaderCommit
 		r.saveState()
@@ -322,7 +343,7 @@ func (r *Raft) appendLogEntries(prefixLen, leaderCommit int, suffix []LogItem) {
 }
 
 // tries to commit log entries
-func (r *Raft) tryCommitLog() {
+func (r *raft) tryCommitLog() {
 	var commitLens []int
 	for _, cl := range r.state.AckedLength {
 		commitLens = append(commitLens, cl)
@@ -333,7 +354,8 @@ func (r *Raft) tryCommitLog() {
 	newCommitLen := commitLens[idx]
 	if newCommitLen > r.state.CommitedIndex {
 		for i := r.state.CommitedIndex; i < newCommitLen; i++ {
-			r.msgHandler(r.logstore.Entry(i).Payload)
+			log := r.logstore.Entry(i)
+			r.msgHandler(log.LogIndex, log.Payload)
 		}
 		r.state.CommitedIndex = newCommitLen
 		r.saveState()
@@ -342,7 +364,7 @@ func (r *Raft) tryCommitLog() {
 }
 
 // append and flush local buffers to replication log
-func (r *Raft) appendAndFlushBuffers(payload []byte) {
+func (r *raft) appendAndFlushBuffers(payload []byte) {
 	prelen := r.logstore.TotalCount()
 	if payload != nil {
 		r.state.LocalBuffer = append(r.state.LocalBuffer, payload)
@@ -372,7 +394,7 @@ func (r *Raft) appendAndFlushBuffers(payload []byte) {
 }
 
 // tries to run for the new leader
-func (r *Raft) runForLeader() {
+func (r *raft) runForLeader() {
 	r.state.CurrentTerm++
 	r.state.CurrentRole = RaftRoleCandidate
 	r.state.VotedFor = r.cfg.CurrentNode
@@ -396,14 +418,14 @@ func (r *Raft) runForLeader() {
 }
 
 // receives AppendRequest message
-func (r *Raft) onAppendRequest(msg *AppendRequest) {
+func (r *raft) onAppendRequest(msg *AppendRequest) {
 	if r.state.CurrentRole == RaftRoleLeader {
 		r.appendMessages(msg.Payloads)
 	}
 }
 
 // receives VoteRequest message
-func (r *Raft) onVoteRequest(msg *VoteRequest) {
+func (r *raft) onVoteRequest(msg *VoteRequest) {
 	if msg == nil {
 		return
 	}
@@ -437,7 +459,7 @@ func (r *Raft) onVoteRequest(msg *VoteRequest) {
 }
 
 // receives VoteResponse message
-func (r *Raft) onVoteResponse(msg *VoteResponse) {
+func (r *raft) onVoteResponse(msg *VoteResponse) {
 	if msg == nil {
 		return
 	}
@@ -460,7 +482,7 @@ func (r *Raft) onVoteResponse(msg *VoteResponse) {
 }
 
 // receives LogRequest message
-func (r *Raft) onLogRequest(msg *LogRequest) {
+func (r *raft) onLogRequest(msg *LogRequest) {
 	if msg == nil {
 		return
 	}
@@ -513,7 +535,7 @@ func (r *Raft) onLogRequest(msg *LogRequest) {
 }
 
 // receives LogResponse message
-func (r *Raft) onLogResponse(msg *LogResponse) {
+func (r *raft) onLogResponse(msg *LogResponse) {
 	if msg == nil {
 		return
 	}

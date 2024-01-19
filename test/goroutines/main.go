@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go-raft/pkg/broadcast"
 	"go-raft/pkg/plugin"
 	"go-raft/pkg/raft"
 	"log"
@@ -116,13 +115,13 @@ func (s *Store) GetAllLogs(ctx context.Context) [][]byte {
 
 type App struct {
 	n     string
-	b     broadcast.Broadcaster
+	b     raft.Raft
 	msgId int
 
 	running bool
 }
 
-func NewApp(nodeID string, b broadcast.Broadcaster) *App {
+func NewApp(nodeID string, b raft.Raft) *App {
 	return &App{
 		n:     nodeID,
 		b:     b,
@@ -130,8 +129,8 @@ func NewApp(nodeID string, b broadcast.Broadcaster) *App {
 	}
 }
 
-func (a *App) onMessage(msg []byte) {
-	fmt.Println(a.n, "|apply|", string(msg))
+func (a *App) onMessage(lsn int, msg []byte) {
+	fmt.Println(a.n, "|apply|", lsn, " - ", string(msg))
 }
 
 func (a *App) Run() {
