@@ -67,7 +67,7 @@ func NewRaft(
 	cfg ClusterConfig,
 	net plugin.Networker,
 	logger *log.Logger) (*Raft, error) {
-	logstore, err := NewLogStore(cfg.CurrentNode + "-log")
+	logstore, err := NewLogStore(cfg.CurrentNode+"-log", logger)
 	if err != nil {
 		return nil, err
 	}

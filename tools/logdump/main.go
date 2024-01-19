@@ -14,7 +14,7 @@ func main() {
 		fmt.Println(("Usage: logdump logfilename"))
 		os.Exit(-1)
 	}
-	logstore, err := raft.NewLogStore(os.Args[1])
+	logstore, err := raft.NewLogStore(os.Args[1], log.Default())
 	if err != nil {
 		log.Fatal("cannot open file", err)
 	}

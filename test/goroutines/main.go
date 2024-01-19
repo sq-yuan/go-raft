@@ -19,9 +19,9 @@ func main() {
 	nodeC := "nodeC"
 	nodes := []string{nodeA, nodeB, nodeC}
 	cmap := map[string]chan []byte{
-		nodeA: make(chan []byte),
-		nodeB: make(chan []byte),
-		nodeC: make(chan []byte),
+		nodeA: make(chan []byte, 5),
+		nodeB: make(chan []byte, 5),
+		nodeC: make(chan []byte, 5),
 	}
 
 	netA := &Net{C: cmap[nodeA], CMap: cmap}
