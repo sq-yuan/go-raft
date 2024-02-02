@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go-raft/pkg/plugin"
 	"log"
 	"math/rand"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/sq-yuan/go-raft/pkg/plugin"
 )
 
 const (
@@ -138,47 +139,51 @@ func (r *raft) Run() {
 		}
 	}()
 
-	for evt := range r.ch {
-		// network events
-		if evt.net != nil {
-			switch {
-			case evt.net.VoteReq != nil:
-				r.onVoteRequest(evt.net.VoteReq)
-			case evt.net.VoteResp != nil:
-				r.onVoteResponse(evt.net.VoteResp)
-			case evt.net.LogReq != nil:
-				r.onLogRequest(evt.net.LogReq)
-			case evt.net.LogResp != nil:
-				r.onLogResponse(evt.net.LogResp)
-			case evt.net.AppendReq != nil:
-				r.onAppendRequest(evt.net.AppendReq)
+	// the main goroutine for raft state machine
+	// runs until close is called
+	go func() {
+		for evt := range r.ch {
+			// network events
+			if evt.net != nil {
+				switch {
+				case evt.net.VoteReq != nil:
+					r.onVoteRequest(evt.net.VoteReq)
+				case evt.net.VoteResp != nil:
+					r.onVoteResponse(evt.net.VoteResp)
+				case evt.net.LogReq != nil:
+					r.onLogRequest(evt.net.LogReq)
+				case evt.net.LogResp != nil:
+					r.onLogResponse(evt.net.LogResp)
+				case evt.net.AppendReq != nil:
+					r.onAppendRequest(evt.net.AppendReq)
+				}
+			}
+
+			// timeout events
+			if evt.timeout != nil {
+				if evt.timeout.Type == ElectionTimeout {
+					r.runForLeader()
+				}
+			}
+
+			// append event
+			if evt.append != nil {
+				r.appendAndFlushBuffers(evt.append.payload)
+			}
+
+			// replication tick
+			if evt.replTick != nil {
+				if r.state.CurrentRole == RaftRoleLeader {
+					r.replicateLogs()
+				}
+			}
+
+			// shutdown
+			if !r.running {
+				break
 			}
 		}
-
-		// timeout events
-		if evt.timeout != nil {
-			if evt.timeout.Type == ElectionTimeout {
-				r.runForLeader()
-			}
-		}
-
-		// append event
-		if evt.append != nil {
-			r.appendAndFlushBuffers(evt.append.payload)
-		}
-
-		// replication tick
-		if evt.replTick != nil {
-			if r.state.CurrentRole == RaftRoleLeader {
-				r.replicateLogs()
-			}
-		}
-
-		// shutdown
-		if !r.running {
-			break
-		}
-	}
+	}()
 }
 
 func (r *raft) Close() {
@@ -196,7 +201,7 @@ func (r *raft) Append(msg []byte) bool {
 }
 
 // Add a callback handler for state machine replication
-func (r *raft) AddHandle(handler MessageHandler) {
+func (r *raft) SetHandler(handler MessageHandler) {
 	r.msgHandler = handler
 }
 

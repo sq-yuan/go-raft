@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go-raft/pkg/plugin"
-	"go-raft/pkg/raft"
 	"log"
 	"math/rand"
 	"time"
+
+	"github.com/sq-yuan/go-raft/pkg/plugin"
+	"github.com/sq-yuan/go-raft/pkg/raft"
 )
 
 // using goroutines to simulate multiple processes
@@ -61,9 +62,9 @@ func main() {
 	go appB.Run()
 	go appC.Run()
 
-	go raftA.Run()
-	go raftB.Run()
-	go raftC.Run()
+	raftA.Run()
+	raftB.Run()
+	raftC.Run()
 
 	for {
 	}
@@ -103,16 +104,6 @@ func (n *Net) Stop() {
 	n.running = false
 }
 
-type Store struct {
-}
-
-func (s *Store) Append(ctx context.Context, state []byte) {
-}
-
-func (s *Store) GetAllLogs(ctx context.Context) [][]byte {
-	return nil
-}
-
 type App struct {
 	n     string
 	b     raft.Raft
@@ -134,7 +125,7 @@ func (a *App) onMessage(lsn int, msg []byte) {
 }
 
 func (a *App) Run() {
-	a.b.AddHandle(a.onMessage)
+	a.b.SetHandler(a.onMessage)
 	a.running = true
 
 	for a.running {

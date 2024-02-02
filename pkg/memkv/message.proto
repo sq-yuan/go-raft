@@ -1,0 +1,22 @@
+syntax = "proto3";
+package memkv;
+
+option go_package = "github.com/sq-yuan/go-raft/memkv";
+
+message SetRequest {
+    string request_id = 1;
+    string key = 2;
+    optional bytes value = 3;
+    optional bool delete = 4;
+    optional bytes if_value_is = 5;
+    optional int64 if_lsn_is = 6;
+    optional bool if_exists_is = 7;   
+}
+
+message KVRequest {
+    string origin_node = 1;
+
+    oneof request {
+        SetRequest set = 2;
+    }
+}

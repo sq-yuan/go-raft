@@ -2,10 +2,11 @@ package main
 
 import (
 	"fmt"
-	"go-raft/pkg/raft"
 	"log"
 	"os"
 	"strings"
+
+	"github.com/sq-yuan/go-raft/pkg/raft"
 )
 
 // dump raft log file

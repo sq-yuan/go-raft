@@ -14,7 +14,7 @@ type Raft interface {
 	// Try to append a message replication queue
 	Append(msg []byte) bool
 	// Register a message handler callback
-	AddHandle(handler MessageHandler)
+	SetHandler(handler MessageHandler)
 	// Replay the replication log from the specified LSN
 	Replay(lsn int) error
 	// Truncate logs till the specified LSN
