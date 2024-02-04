@@ -35,7 +35,7 @@ type RaftState struct {
 	AckedLength map[string]int
 }
 
-func NewRestoredRaftState(ctx context.Context, cfg ClusterConfig, store StateStore) *RaftState {
+func NewRestoredRaftState(ctx context.Context, cfg RaftConfig, store StateStore) *RaftState {
 	state := &RaftState{
 		PersistedState: PersistedState{
 			CurrentTerm:   0,

@@ -8,63 +8,80 @@ const SHARD_COUNT = 32
 
 // A concurrent map
 type Map[K comparable, V any] struct {
-	shards   []*mapShard[K, V]
+	shards   []*MapShard[K, V]
 	hashFunc func(key K) uint32
 }
 
-type mapShard[K comparable, V any] struct {
-	items map[K]V
+type MapShard[K comparable, V any] struct {
+	Items map[K]V
 	sync.RWMutex
 }
 
-func create[K comparable, V any](hashFunc func(key K) uint32) *Map[K, V] {
+func create[K comparable, V any](hashFunc func(key K) uint32, existingData map[K]V) *Map[K, V] {
 	m := Map[K, V]{
-		shards:   make([]*mapShard[K, V], SHARD_COUNT),
+		shards:   make([]*MapShard[K, V], SHARD_COUNT),
 		hashFunc: hashFunc,
 	}
 	for i := 0; i < SHARD_COUNT; i++ {
-		m.shards[i] = &mapShard[K, V]{items: make(map[K]V)}
+		m.shards[i] = &MapShard[K, V]{Items: make(map[K]V)}
+	}
+	for k, v := range existingData {
+		hash := m.hashFunc(k)
+		shard := hash % SHARD_COUNT
+		m.shards[shard].Items[k] = v
 	}
 	return &m
 }
 
-func (m *Map[K, V]) getShard(k K) *mapShard[K, V] {
+func (m *Map[K, V]) GetShardCount() int {
+	return SHARD_COUNT
+}
+
+func (m *Map[K, V]) GetShardByIndex(i int) *MapShard[K, V] {
+	return m.shards[i]
+}
+
+func (m *Map[K, V]) GetShard(k K) *MapShard[K, V] {
 	hash := m.hashFunc(k)
 	shard := hash % SHARD_COUNT
 	return m.shards[shard]
 }
 
 func NewMap[V any]() *Map[string, V] {
-	return create[string, V](stringKeyhash)
+	return create[string, V](stringKeyhash, nil)
+}
+
+func NewMapFrom[V any](data map[string]V) *Map[string, V] {
+	return create[string, V](stringKeyhash, data)
 }
 
 func (m *Map[K, V]) Remove(key K) {
-	shard := m.getShard(key)
+	shard := m.GetShard(key)
 	shard.Lock()
 	defer shard.Unlock()
-	delete(shard.items, key)
+	delete(shard.Items, key)
 }
 
 func (m *Map[K, V]) Set(key K, value V) {
-	shard := m.getShard(key)
+	shard := m.GetShard(key)
 	shard.Lock()
 	defer shard.Unlock()
-	shard.items[key] = value
+	shard.Items[key] = value
 }
 
 func (m *Map[K, V]) Exist(key K) bool {
-	shard := m.getShard(key)
+	shard := m.GetShard(key)
 	shard.Lock()
 	defer shard.Unlock()
-	_, ok := shard.items[key]
+	_, ok := shard.Items[key]
 	return ok
 }
 
 func (m *Map[K, V]) Get(key K) *V {
-	shard := m.getShard(key)
+	shard := m.GetShard(key)
 	shard.RLock()
 	defer shard.RUnlock()
-	if val, ok := shard.items[key]; ok {
+	if val, ok := shard.Items[key]; ok {
 		return &val
 	} else {
 		return nil

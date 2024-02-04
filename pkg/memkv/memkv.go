@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"errors"
 	"log"
+	"regexp"
+	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sq-yuan/go-raft/pkg/concurrent"
 	"github.com/sq-yuan/go-raft/pkg/raft"
 	"google.golang.org/protobuf/proto"
 )
+
+const CheckpointInterval = time.Minute
 
 type setret struct {
 	success bool
@@ -33,26 +38,59 @@ type mapentry struct {
 	Payload []byte
 }
 
+type StoreConfig struct {
+	DatafilePath   string
+	DatafilePrefix string
+}
+
+// A memory based key/value store using Raft
+// All data will be held in memory and we use checkpointing to periodically persist data
+// back to disk along with the last seen LSN.
+// Upon recovery we'll reload the data into memory and replay all raft messages since the last know LSN.
+// So we literally use Raft replication log as the write ahead log for the database
 type MemKvStore struct {
-	store *concurrent.Map[string, mapentry]
+	// A list of in-memory maps
+	// Regular write operation always update the last map and read always starts from the end till the head
+	// During checkpointing, the checkpointing goroutine will append a new map to the list, which will be used
+	// for update, and the old maps will be acting like a snapshot and will be iterated and persisted to disk
+	// once the checkpointing is done, all the old maps will be merged into a single one. So most of the time we'll
+	// only have three maps in the list.
+	// Doing this we avoided using locks during checkpointing.
+	store atomic.Value
 	raft  raft.Raft
 
+	config StoreConfig
 	logger *log.Logger
 
 	setch chan setwait
 	smch  chan smmsg
+
+	ready atomic.Bool
+
+	cpTicker *time.Ticker
+	cpDoneCh chan bool
+
+	lastCheckPointTs time.Time
 }
 
 //go:generate protoc --go_out=. --go_opt=paths=source_relative message.proto
-func NewMemKVStore(raft raft.Raft, logger *log.Logger) *MemKvStore {
+func NewMemKVStore(config StoreConfig, raft raft.Raft, logger *log.Logger) *MemKvStore {
 	if raft == nil {
 		return nil
 	}
-	return &MemKvStore{
-		store:  concurrent.NewMap[mapentry](),
-		raft:   raft,
-		logger: logger,
+	if config.DatafilePath == "" {
+		config.DatafilePath = "."
 	}
+	store := &MemKvStore{
+		raft:     raft,
+		config:   config,
+		logger:   logger,
+		cpTicker: time.NewTicker(CheckpointInterval),
+		cpDoneCh: make(chan bool),
+	}
+	store.cpTicker.Stop()
+	store.ready.Store(false)
+	return store
 }
 
 func (s *MemKvStore) onMessage(lsn int, msg []byte) {
@@ -63,7 +101,13 @@ func (s *MemKvStore) Start() {
 	s.setch = make(chan setwait, 100)
 	s.smch = make(chan smmsg, 100)
 	s.raft.SetHandler(s.onMessage)
+
+	// restore before start raft
+	s.restore()
+
 	s.raft.Run()
+
+	s.startCPRoutine()
 
 	// write go-routine
 	go func() {
@@ -87,7 +131,7 @@ func (s *MemKvStore) Start() {
 					}
 					setreq := kvreq.GetSet()
 					if setreq != nil {
-						entry := s.store.Get(setreq.Key)
+						entry := s.storeget(setreq.Key)
 						precondition := true
 						if setreq.IfLsnIs != nil {
 							precondition = precondition && entry != nil && *setreq.IfLsnIs == entry.LSN
@@ -113,10 +157,10 @@ func (s *MemKvStore) Start() {
 						} else {
 							if setreq.Delete != nil && *setreq.Delete {
 								s.logger.Printf("SetRequest: %s, applied. %s deleted!", setreq.RequestId, setreq.Key)
-								s.store.Remove(setreq.Key)
+								s.storeset(setreq.Key, mapentry{LSN: sm.lsn, Payload: nil, Deleted: true})
 							} else {
 								s.logger.Printf("SetRequest: %s, applied. %s updated!", setreq.RequestId, setreq.Key)
-								s.store.Set(setreq.Key, mapentry{LSN: sm.lsn, Payload: setreq.Value, Deleted: false})
+								s.storeset(setreq.Key, mapentry{LSN: sm.lsn, Payload: setreq.Value, Deleted: false})
 							}
 							ret.success = true
 							ret.lsn = sm.lsn
@@ -137,21 +181,46 @@ func (s *MemKvStore) Start() {
 	}()
 }
 
+func (s *MemKvStore) storeget(key string) *mapentry {
+	list := s.store.Load().([]*concurrent.Map[string, mapentry])
+	for i := len(list) - 1; i >= 0; i-- {
+		entry := list[i].Get(key)
+		if entry != nil {
+			return entry
+		}
+	}
+	return nil
+}
+
+func (s *MemKvStore) storeset(key string, entry mapentry) {
+	list := s.store.Load().([]*concurrent.Map[string, mapentry])
+	list[len(list)-1].Set(key, entry)
+}
+
 func (s *MemKvStore) Stop() {
 	s.raft.Close()
 	s.raft.SetHandler(nil)
 	close(s.setch)
 	close(s.smch)
+	s.stopCPRoutine()
 }
+
+var keyValidator = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9\-\_\\\/]*`)
 
 func validateKey(key string) bool {
 	if len(key) == 0 {
+		return false
+	}
+	if !keyValidator.Match([]byte(key)) {
 		return false
 	}
 	return true
 }
 
 func (s *MemKvStore) Set(req SetReq) (*SetResp, error) {
+	if !s.ready.Load() {
+		return nil, errors.New("server not ready")
+	}
 	if !validateKey(req.Key) {
 		return nil, errors.New("invalid key")
 	}
@@ -171,13 +240,15 @@ func (s *MemKvStore) Set(req SetReq) (*SetResp, error) {
 	if err != nil {
 		return nil, err
 	}
-	receivech := make(chan setret)
+	receivech := make(chan setret, 1)
 	setwait := setwait{
 		requestId: reqid,
 		ch:        receivech,
 	}
 	s.setch <- setwait
-	s.raft.Append(bytes)
+	if !s.raft.Append(bytes) {
+		return nil, errors.New("server not ready")
+	}
 	ret := <-receivech
 	return &SetResp{
 		Success: ret.success,
@@ -186,10 +257,13 @@ func (s *MemKvStore) Set(req SetReq) (*SetResp, error) {
 }
 
 func (s *MemKvStore) Get(req GetReq) (*GetResp, error) {
+	if !s.ready.Load() {
+		return nil, errors.New("server not ready")
+	}
 	if !validateKey(req.Key) {
 		return nil, errors.New("invalid key")
 	}
-	entry := s.store.Get(req.Key)
+	entry := s.storeget(req.Key)
 	if entry != nil && !entry.Deleted {
 		return &GetResp{LSN: entry.LSN, Exist: true, Value: entry.Payload}, nil
 	} else if entry != nil {

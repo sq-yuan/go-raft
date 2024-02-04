@@ -3,9 +3,9 @@ package raft
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"math/rand"
+	"path"
 	"sort"
 	"sync"
 	"time"
@@ -43,7 +43,7 @@ type event struct {
 }
 
 type raft struct {
-	cfg    ClusterConfig
+	cfg    RaftConfig
 	net    plugin.Networker
 	logger *log.Logger
 
@@ -66,14 +66,18 @@ type raft struct {
 
 func NewRaft(
 	ctx context.Context,
-	cfg ClusterConfig,
+	cfg RaftConfig,
 	net plugin.Networker,
 	logger *log.Logger) (Raft, error) {
-	logstore, err := NewLogStore(cfg.CurrentNode+"-log", logger)
+	if cfg.LogFilePath == "" {
+		cfg.LogFilePath = "."
+	}
+	logfile := path.Join(cfg.LogFilePath, cfg.LogFilePrefix)
+	logstore, err := NewLogStore(logfile+"-log", logger)
 	if err != nil {
 		return nil, err
 	}
-	statestore, err := NewStateStore(cfg.CurrentNode + "-state")
+	statestore, err := NewStateStore(logfile + "-state")
 	if err != nil {
 		return nil, err
 	}
@@ -205,16 +209,24 @@ func (r *raft) SetHandler(handler MessageHandler) {
 	r.msgHandler = handler
 }
 
+func (r *raft) LastLSN() int {
+	return r.state.CommitedIndex
+}
+
 // Replay the replication log from the specified LSN
 func (r *raft) Replay(lsn int) error {
 	if r.running {
 		return errors.New("cannot replay while state machine is running")
 	}
-	if lsn < 0 || lsn >= r.logstore.TotalCount() {
-		return fmt.Errorf("lsn out of range")
+	if r.msgHandler == nil {
+		return errors.New("handler is not set")
 	}
-	for _, log := range r.logstore.Entries(lsn, r.logstore.TotalCount()) {
-		r.msgHandler(log.LogIndex, log.Payload)
+	if lsn < 0 || lsn >= r.state.CommitedIndex {
+		return nil
+	}
+	for _, log := range r.logstore.Entries(lsn, r.state.CommitedIndex) {
+		// logIndex starts from 0, this is to make sure LSN is always non-zero
+		r.msgHandler(log.LogIndex+1, log.Payload)
 	}
 	return nil
 }

@@ -29,25 +29,28 @@ func main() {
 	netC := &Net{C: cmap[nodeC], CMap: cmap}
 
 	ctx := context.Background()
-	raftA, err := raft.NewRaft(ctx, raft.ClusterConfig{
-		CurrentNode: nodeA,
-		Nodes:       nodes,
+	raftA, err := raft.NewRaft(ctx, raft.RaftConfig{
+		LogFilePrefix: nodeA,
+		CurrentNode:   nodeA,
+		Nodes:         nodes,
 	}, netA, log.Default())
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	raftB, err := raft.NewRaft(ctx, raft.ClusterConfig{
-		CurrentNode: nodeB,
-		Nodes:       nodes,
+	raftB, err := raft.NewRaft(ctx, raft.RaftConfig{
+		LogFilePrefix: nodeB,
+		CurrentNode:   nodeB,
+		Nodes:         nodes,
 	}, netB, log.Default())
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	raftC, err := raft.NewRaft(ctx, raft.ClusterConfig{
-		CurrentNode: nodeC,
-		Nodes:       nodes,
+	raftC, err := raft.NewRaft(ctx, raft.RaftConfig{
+		LogFilePrefix: nodeC,
+		CurrentNode:   nodeC,
+		Nodes:         nodes,
 	}, netC, log.Default())
 	if err != nil {
 		log.Fatal(err)

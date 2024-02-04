@@ -47,8 +47,8 @@ type GetResp struct {
 	Value []byte
 }
 
-// A memory based key-value store
-type MemKVStore interface {
+// A key-value store
+type KVStore interface {
 	Set(req SetReq) (*SetResp, error)
 	Get(req GetReq) (*GetResp, error)
 }

@@ -15,6 +15,8 @@ type Raft interface {
 	Append(msg []byte) bool
 	// Register a message handler callback
 	SetHandler(handler MessageHandler)
+	// Return the most recent LSN for the statemachine
+	LastLSN() int
 	// Replay the replication log from the specified LSN
 	Replay(lsn int) error
 	// Truncate logs till the specified LSN

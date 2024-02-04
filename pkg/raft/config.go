@@ -1,6 +1,8 @@
 package raft
 
-type ClusterConfig struct {
-	Nodes       []string
-	CurrentNode string
+type RaftConfig struct {
+	LogFilePrefix string
+	LogFilePath   string
+	Nodes         []string
+	CurrentNode   string
 }

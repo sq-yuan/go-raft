@@ -37,33 +37,36 @@ func main() {
 	netC := &Net{C: cmap[nodeC], CMap: cmap}
 
 	ctx := context.Background()
-	raftA, err := raft.NewRaft(ctx, raft.ClusterConfig{
-		CurrentNode: nodeA,
-		Nodes:       nodes,
+	raftA, err := raft.NewRaft(ctx, raft.RaftConfig{
+		LogFilePrefix: nodeA,
+		CurrentNode:   nodeA,
+		Nodes:         nodes,
 	}, netA, logger)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	raftB, err := raft.NewRaft(ctx, raft.ClusterConfig{
-		CurrentNode: nodeB,
-		Nodes:       nodes,
+	raftB, err := raft.NewRaft(ctx, raft.RaftConfig{
+		LogFilePrefix: nodeB,
+		CurrentNode:   nodeB,
+		Nodes:         nodes,
 	}, netB, logger)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	raftC, err := raft.NewRaft(ctx, raft.ClusterConfig{
-		CurrentNode: nodeC,
-		Nodes:       nodes,
+	raftC, err := raft.NewRaft(ctx, raft.RaftConfig{
+		LogFilePrefix: nodeC,
+		CurrentNode:   nodeC,
+		Nodes:         nodes,
 	}, netC, logger)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	kvA := memkv.NewMemKVStore(raftA, log.New(os.Stdout, "replica-A: ", 0))
-	kvB := memkv.NewMemKVStore(raftB, log.New(os.Stdout, "replica-B: ", 0))
-	kvC := memkv.NewMemKVStore(raftC, log.New(os.Stdout, "replica-C: ", 0))
+	kvA := memkv.NewMemKVStore(memkv.StoreConfig{DatafilePrefix: "replica-A"}, raftA, log.New(os.Stdout, "replica-A: ", 0))
+	kvB := memkv.NewMemKVStore(memkv.StoreConfig{DatafilePrefix: "replica-B"}, raftB, log.New(os.Stdout, "replica-B: ", 0))
+	kvC := memkv.NewMemKVStore(memkv.StoreConfig{DatafilePrefix: "replica-C"}, raftC, log.New(os.Stdout, "replica-C: ", 0))
 
 	kvA.Start()
 	kvB.Start()
